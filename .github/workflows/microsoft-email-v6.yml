@@ -174,10 +174,11 @@ jobs:
           pattern: microsoft-email-result-*
           path: ${{ runner.temp }}/microsoft-email-results
           merge-multiple: false
-      - name: 幂等汇总并推送
+      - name: 幂等汇总并回写邮箱池
         if: needs.prepare.result == 'success'
         env:
           RESULTS_DIR: ${{ runner.temp }}/microsoft-email-results
+          AUXILIARY_CREDENTIALS: ${{ inputs.auxiliary_credentials || secrets.AUXILIARY_CREDENTIALS }}
         shell: bash
         run: |
           set -euo pipefail
@@ -190,9 +191,12 @@ jobs:
               --结果目录 "$RESULTS_DIR" \
               --邮箱文件 verified_email.txt \
               --输出文件 成功账号.txt \
+              --辅助邮箱文件 辅助邮箱.txt \
+              --完整凭据输出 \
               --预期任务数量 "${{ needs.prepare.outputs.task_count }}" \
               --summary "$GITHUB_STEP_SUMMARY"
-            git add -- verified_email.txt 成功账号.txt
+            # 仅回写邮箱池；成功账号文件只作为本次运行 Artifact 保存。
+            git add -- verified_email.txt
             if git diff --cached --quiet; then
               exit 0
             fi

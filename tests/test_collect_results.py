@@ -170,3 +170,104 @@ def test_success_without_credentialaction_allows_empty_auxiliary_email(tmp_path:
     summary = module.collect_results(tmp_path)
     assert summary.successful == 1
     assert module.format_success_record(summary.accepted[0]).startswith("辅邮：\n")
+
+
+def test_apply_full_credentials_uses_auxiliary_and_main_pool_lines(tmp_path: Path) -> None:
+    results = tmp_path / "artifacts"
+    pool = tmp_path / "verified_email.txt"
+    auxiliary_pool = tmp_path / "辅助邮箱.txt"
+    output = tmp_path / "成功账号.txt"
+    pool.write_text(
+        "Person@example.test----main-pass----main-client----main-token\n",
+        encoding="utf-8",
+    )
+    auxiliary_pool.write_text(
+        "helper@example.test----helper-pass----helper-client----helper-token\n",
+        encoding="utf-8",
+    )
+    _write_result(results / "job-1" / "result.json")
+
+    summary = module.apply_results(
+        results,
+        pool,
+        output,
+        expected_tasks=1,
+        include_credentials=True,
+        auxiliary_pool_path=auxiliary_pool,
+    )
+    rerun = module.apply_results(
+        results,
+        pool,
+        output,
+        expected_tasks=1,
+        include_credentials=True,
+        auxiliary_pool_path=auxiliary_pool,
+    )
+
+    assert summary.appended == 1
+    assert rerun.appended == 0
+    assert rerun.removed == 0
+    assert output.read_text(encoding="utf-8") == (
+        "辅邮：helper@example.test----helper-pass----helper-client----helper-token\n"
+        "主邮：Person@example.test----main-pass----main-client----main-token\n"
+        "子邮1：Person01@example.test----main-pass----main-client----main-token\n"
+        "子邮2：Person02@example.test----main-pass----main-client----main-token\n\n"
+    )
+
+
+def test_apply_full_credentials_accepts_workflow_auxiliary_override(tmp_path: Path) -> None:
+    results = tmp_path / "artifacts"
+    pool = tmp_path / "verified_email.txt"
+    output = tmp_path / "成功账号.txt"
+    pool.write_text(
+        "Person@example.test----main-pass----main-client----main-token\n",
+        encoding="utf-8",
+    )
+    _write_result(results / "job-1" / "result.json")
+
+    module.apply_results(
+        results,
+        pool,
+        output,
+        expected_tasks=1,
+        include_credentials=True,
+        auxiliary_credentials_raw=(
+            "helper@example.test----override-pass----override-client----override-token"
+        ),
+    )
+
+    assert output.read_text(encoding="utf-8").startswith(
+        "辅邮：helper@example.test----override-pass----override-client----override-token\n"
+    )
+
+
+def test_workflow_auxiliary_override_rejects_result_for_another_helper(tmp_path: Path) -> None:
+    results = tmp_path / "artifacts"
+    pool = tmp_path / "verified_email.txt"
+    auxiliary_pool = tmp_path / "辅助邮箱.txt"
+    output = tmp_path / "成功账号.txt"
+    pool.write_text(
+        "Person@example.test----main-pass----main-client----main-token\n",
+        encoding="utf-8",
+    )
+    auxiliary_pool.write_text(
+        "result-helper@example.test----file-pass----file-client----file-token\n",
+        encoding="utf-8",
+    )
+    _write_result(
+        results / "job-1" / "result.json",
+        auxiliary_email="result-helper@example.test",
+    )
+
+    with pytest.raises(ValueError, match="辅助邮箱凭据与结果邮箱不匹配"):
+        module.apply_results(
+            results,
+            pool,
+            output,
+            expected_tasks=1,
+            include_credentials=True,
+            auxiliary_pool_path=auxiliary_pool,
+            auxiliary_credentials_raw=(
+                "workflow-helper@example.test----override-pass----override-client----override-token"
+            ),
+        )

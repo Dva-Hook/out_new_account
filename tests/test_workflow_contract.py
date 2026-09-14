@@ -48,3 +48,12 @@ def test_workflow_does_not_interpolate_credentials_into_commands() -> None:
     )
     assert "cat verified_email.txt" not in text
     assert "::add-mask::" in text
+
+
+def test_success_file_is_artifact_only() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "git add -- verified_email.txt 成功账号.txt" not in text
+    assert "git add -- verified_email.txt" in text
+    assert "path: 成功账号.txt" in text
+    assert "--完整凭据输出" in text
+    assert "AUXILIARY_CREDENTIALS: ${{ inputs.auxiliary_credentials || secrets.AUXILIARY_CREDENTIALS }}" in text

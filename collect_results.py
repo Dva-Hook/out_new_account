@@ -20,7 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from email_pool import remove_consumed_emails
+from email_pool import (
+    EmailCredential,
+    load_email_pool,
+    parse_credential_line,
+    remove_consumed_emails,
+)
 
 
 SCHEMA_VERSION = 1
@@ -342,6 +347,41 @@ def format_success_record(record: SuccessRecord) -> str:
     )
 
 
+def _credential_line(credential: EmailCredential, email: str | None = None) -> str:
+    address = (email or credential.email).strip()
+    if _email(address) is None:
+        raise ValueError("凭据邮箱格式无效")
+    return "----".join((address, credential.password, credential.client_id, credential.token))
+
+
+def format_full_success_record(
+    record: SuccessRecord,
+    *,
+    main_credential: EmailCredential,
+    auxiliary_credential: EmailCredential | None = None,
+) -> str:
+    """Render the requested four-line credential record.
+
+    This formatter is used only by the explicit workflow option.  The normal
+    ``format_success_record`` path remains metadata-only for library callers.
+    Alias lines deliberately reuse the main mailbox credentials.
+    """
+
+    auxiliary_line = ""
+    if auxiliary_credential is not None:
+        if record.auxiliary_email and (
+            auxiliary_credential.email.casefold() != record.auxiliary_email.casefold()
+        ):
+            raise ValueError("辅助邮箱凭据与结果邮箱不匹配")
+        auxiliary_line = _credential_line(auxiliary_credential)
+    return (
+        f"辅邮：{auxiliary_line}\n"
+        f"主邮：{_credential_line(main_credential)}\n"
+        f"子邮1：{_credential_line(main_credential, record.aliases[0])}\n"
+        f"子邮2：{_credential_line(main_credential, record.aliases[1])}\n\n"
+    )
+
+
 # Compatibility spelling used by a few callers.
 format_account_record = format_success_record
 
@@ -376,7 +416,7 @@ def _existing_main_emails(text: str) -> set[str]:
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if line.startswith("主邮："):
-            value = line[len("主邮：") :].strip()
+            value = line[len("主邮：") :].strip().split("----", 1)[0].strip()
             if _email(value) is not None:
                 found.add(value.casefold())
     return found
@@ -388,8 +428,11 @@ def apply_results(
     output_path: Path | str,
     *,
     expected_tasks: int | None = None,
+    include_credentials: bool = False,
+    auxiliary_pool_path: Path | str | None = None,
+    auxiliary_credentials_raw: str | None = None,
 ) -> ApplySummary:
-    """Append new safe records and consume only their confirmed main emails."""
+    """Append accepted records and consume only their confirmed main emails."""
 
     pool = Path(pool_path).expanduser().resolve()
     output = Path(output_path).expanduser().resolve()
@@ -408,7 +451,50 @@ def apply_results(
         prefix = existing
         if prefix and not prefix.endswith(("\n", "\r")):
             prefix += "\n"
-        _atomic_write_text(output, prefix + "".join(format_success_record(item) for item in additions))
+        if include_credentials:
+            main_credentials = {
+                item.email.casefold(): item
+                for item in load_email_pool(pool)
+            }
+            auxiliary_credentials: dict[str, EmailCredential] = {}
+            raw_auxiliary = (auxiliary_credentials_raw or "").strip()
+            parsed_auxiliary: EmailCredential | None = None
+            if raw_auxiliary:
+                parsed_auxiliary = parse_credential_line(raw_auxiliary, source_index=1)
+                auxiliary_credentials[parsed_auxiliary.email.casefold()] = parsed_auxiliary
+            auxiliary_path = Path(auxiliary_pool_path).expanduser().resolve() if auxiliary_pool_path else pool.with_name("辅助邮箱.txt")
+            if not raw_auxiliary and auxiliary_path.is_file():
+                for item in load_email_pool(auxiliary_path):
+                    auxiliary_credentials.setdefault(item.email.casefold(), item)
+
+            rendered_records: list[str] = []
+            for record in additions:
+                main_credential = main_credentials.get(record.main_email.casefold())
+                if main_credential is None:
+                    raise ValueError("成功主邮箱凭据未在邮箱池中找到")
+                auxiliary_credential = None
+                if record.auxiliary_email:
+                    if parsed_auxiliary is not None and (
+                        parsed_auxiliary.email.casefold()
+                        != record.auxiliary_email.casefold()
+                    ):
+                        raise ValueError("辅助邮箱凭据与结果邮箱不匹配")
+                    auxiliary_credential = auxiliary_credentials.get(
+                        record.auxiliary_email.casefold()
+                    )
+                    if auxiliary_credential is None:
+                        raise ValueError("成功辅助邮箱凭据未找到")
+                rendered_records.append(
+                    format_full_success_record(
+                        record,
+                        main_credential=main_credential,
+                        auxiliary_credential=auxiliary_credential,
+                    )
+                )
+            rendered = "".join(rendered_records)
+        else:
+            rendered = "".join(format_success_record(item) for item in additions)
+        _atomic_write_text(output, prefix + rendered)
     elif not output.is_file():
         _atomic_write_text(output, "")
 
@@ -464,6 +550,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--摘要文件", "--summary", dest="summary_path")
     parser.add_argument("--预期任务数量", "--expected-tasks", dest="expected_tasks", type=int)
+    parser.add_argument("--完整凭据输出", action="store_true", help="将成功账号完整四字段写入本次 Artifact")
+    parser.add_argument("--辅助邮箱文件", default="", help="辅助邮箱凭据文件")
     return parser
 
 
@@ -475,6 +563,13 @@ def main(argv: list[str] | None = None) -> int:
             args.pool_path,
             args.output_path,
             expected_tasks=args.expected_tasks,
+            include_credentials=args.完整凭据输出,
+            auxiliary_pool_path=args.辅助邮箱文件 or None,
+            auxiliary_credentials_raw=(
+                os.environ.get("AUXILIARY_CREDENTIALS")
+                if args.完整凭据输出
+                else None
+            ),
         )
     except Exception as exc:
         # Exception text is generated from paths/counts only.  Never print a
@@ -508,6 +603,7 @@ __all__ = [
     "build_parser",
     "collect_results",
     "format_account_record",
+    "format_full_success_record",
     "format_success_record",
     "main",
     "render_actions_summary",
