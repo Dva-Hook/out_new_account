@@ -59,3 +59,9 @@ def test_success_file_is_artifact_only() -> None:
     assert "name: microsoft-email-success-${{ github.run_id }}" not in text
     assert "--完整凭据输出" in text
     assert "AUXILIARY_CREDENTIALS: ${{ inputs.auxiliary_credentials || secrets.AUXILIARY_CREDENTIALS }}" in text
+
+
+def test_workflow_uploads_stage_diagnostics_separately() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "name: microsoft-email-diagnostic-${{ matrix.index }}" in text
+    assert "path: artifacts/job-${{ matrix.index }}/失败截图" in text

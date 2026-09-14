@@ -147,6 +147,14 @@ jobs:
           path: artifacts/job-${{ matrix.index }}
           if-no-files-found: error
           retention-days: 7
+      - name: 上传失败诊断截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: microsoft-email-diagnostic-${{ matrix.index }}
+          path: artifacts/job-${{ matrix.index }}/失败截图
+          if-no-files-found: warn
+          retention-days: 7
       - name: 标记任务失败
         if: steps.run.outcome != 'success'
         run: exit 1

@@ -302,6 +302,7 @@ def _default_performer(
             or open_microsoft_email.DEFAULT_AUXILIARY_CREDENTIALS_FILE,
             auxiliary_loader=load_auxiliary,
             auxiliary_result=selected_auxiliary_box,
+            diagnostic_dir=snapshot_dir,
         )
         return {
             "aliases": list(aliases),

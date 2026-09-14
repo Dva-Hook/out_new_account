@@ -842,7 +842,7 @@ def is_credential_action_redirect(href: str) -> bool:
 
 def read_navigation_state(page: Any) -> dict[str, Any]:
     state = page.run_js(
-        "return {href:String(location.href||''), ready_state:String(document.readyState||''), associated_id_present:Boolean(document.querySelector('#AssociatedIdLive')), code_entry_present:Boolean(document.querySelector('#codeEntry-0'))}",
+        "return {href:String(location.href||''), ready_state:String(document.readyState||''), associated_id_present:Boolean(document.querySelector('#AssociatedIdLive')), code_entry_present:Boolean(document.querySelector('#codeEntry-0')), auxiliary_input_present:Boolean(document.querySelector('#floatingLabelInput10')), primary_button_present:Boolean(document.querySelector('button[type=\"submit\"][data-testid=\"primaryButton\"]'))}",
         timeout=5,
     )
     return state if isinstance(state, dict) else {}
@@ -971,6 +971,7 @@ def login_and_add_aliases(
     security_code_fetcher: Any = fetch_security_code,
     interaction_lock: Any = BROWSER_INTERACTION_LOCK,
     auxiliary_result: list[Any] | None = None,
+    diagnostic_dir: Path | None = None,
 ) -> list[str]:
     prefix = email_prefix(email)
     if not password:
@@ -997,37 +998,97 @@ def login_and_add_aliases(
         result = run_locked(lambda: state_reader(target))
         return result if isinstance(result, dict) else {}
 
-    input_value(
-        page,
-        USERNAME_SELECTOR,
-        "微软邮箱账号输入框",
-        email,
-        clear=True,
-    )
-    click_value(page, PRIMARY_BUTTON_SELECTOR, "微软邮箱账号 Next 按钮")
+    def state_summary(target: Any) -> str:
+        try:
+            state = read_state(target)
+        except Exception as exc:
+            return f"state_error={type(exc).__name__}"
+        href = str(state.get("href") or "").casefold()
+        if is_credential_action_redirect(href):
+            location = "credentialaction"
+        elif href.startswith(ADD_ALIAS_URL.casefold()):
+            location = "addassocid"
+        elif href.startswith(ACCOUNT_NAMES_PREFIX.casefold()):
+            location = "names"
+        elif "account.microsoft.com" in href:
+            location = "account-home"
+        elif "login.live.com" in href:
+            location = "login"
+        else:
+            location = "other"
+        return (
+            f"url_type={location} ready={state.get('ready_state', 'unknown')} "
+            f"primary_button={state.get('primary_button_present', 'unknown')} "
+            f"auxiliary_input={state.get('auxiliary_input_present', 'unknown')} "
+            f"code_input={state.get('code_entry_present', 'unknown')} "
+            f"alias_input={state.get('associated_id_present', 'unknown')}"
+        )
 
-    input_value(page, PASSWORD_SELECTOR, "微软邮箱密码输入框", password, clear=True)
-    click_value(page, PRIMARY_BUTTON_SELECTOR, "微软邮箱密码 Next 按钮")
-    wait_for_url(
-        page,
-        "account.microsoft.com",
-        timeout=timeout,
-        state_reader=read_state,
-        sleeper=sleeper,
-        monotonic=monotonic,
+    diagnostic_count = 0
+
+    def run_stage(target: Any, stage: str, callback: Any) -> Any:
+        nonlocal diagnostic_count
+        LOG.info("页面阶段开始: %s | %s", stage, state_summary(target))
+        try:
+            result = callback()
+        except Exception as exc:
+            LOG.warning(
+                "页面阶段失败: %s | error=%s | %s",
+                stage,
+                type(exc).__name__,
+                state_summary(target),
+            )
+            if diagnostic_dir is not None:
+                diagnostic_count += 1
+                filename = re.sub(r"[^A-Za-z0-9_-]", "-", stage)
+                snapshot = Path(diagnostic_dir) / f"{filename}-{diagnostic_count:02d}.png"
+                try:
+                    snapshot.parent.mkdir(parents=True, exist_ok=True)
+                    run_locked(lambda: core.save_screenshot(target, snapshot))
+                    if snapshot.is_file():
+                        LOG.warning("阶段诊断截图已保存: %s", snapshot.name)
+                    else:
+                        LOG.warning("阶段诊断截图未生成: %s", snapshot.name)
+                except Exception as snapshot_error:
+                    LOG.warning("阶段诊断截图失败: %s", type(snapshot_error).__name__)
+            raise
+        LOG.info("页面阶段完成: %s | %s", stage, state_summary(target))
+        return result
+
+    run_stage(
+        page, "login-username-input",
+        lambda: input_value(page, USERNAME_SELECTOR, "微软邮箱账号输入框", email, clear=True),
+    )
+    run_stage(page, "login-username-next", lambda: click_value(page, PRIMARY_BUTTON_SELECTOR, "微软邮箱账号 Next 按钮"))
+
+    run_stage(page, "login-password-input", lambda: input_value(page, PASSWORD_SELECTOR, "微软邮箱密码输入框", password, clear=True))
+    run_stage(page, "login-password-next", lambda: click_value(page, PRIMARY_BUTTON_SELECTOR, "微软邮箱密码 Next 按钮"))
+    run_stage(
+        page, "login-account-home-wait",
+        lambda: wait_for_url(
+            page,
+            "account.microsoft.com",
+            timeout=timeout,
+            state_reader=read_state,
+            sleeper=sleeper,
+            monotonic=monotonic,
+        ),
     )
 
     aliases: list[str] = []
     for index, selector in enumerate(EMAIL_ALIAS_SELECTORS, start=1):
         alias = f"{prefix}{index:02d}"
         alias_tab = run_locked(lambda: page.new_tab("about:blank", background=False))
-        navigate_value(alias_tab, ADD_ALIAS_URL, "微软邮箱别名添加页")
-        current_state = wait_for_alias_entry(
-            alias_tab,
-            timeout=timeout,
-            state_reader=read_state,
-            sleeper=sleeper,
-            monotonic=monotonic,
+        run_stage(alias_tab, f"alias-{index}-open-addassocid", lambda: navigate_value(alias_tab, ADD_ALIAS_URL, "微软邮箱别名添加页"))
+        current_state = run_stage(
+            alias_tab, f"alias-{index}-entry-wait",
+            lambda: wait_for_alias_entry(
+                alias_tab,
+                timeout=timeout,
+                state_reader=read_state,
+                sleeper=sleeper,
+                monotonic=monotonic,
+            ),
         )
         current_href = str(current_state.get("href") or "")
         challenge_attempts = 0
@@ -1036,52 +1097,66 @@ def login_and_add_aliases(
                 raise RuntimeError("credentialaction 重定向次数超过上限")
             challenge_attempts += 1
             LOG.info("检测到 credentialaction 重定向，先绑定辅助邮箱")
-            click_value(alias_tab, PRIMARY_BUTTON_SELECTOR, "添加辅助邮箱按钮")
-            auxiliary = auxiliary_credentials or auxiliary_loader(auxiliary_credentials_file)
+            stage_prefix = f"credentialaction-alias-{index}-{challenge_attempts}"
+            run_stage(alias_tab, f"{stage_prefix}-add-email-button", lambda: click_value(alias_tab, PRIMARY_BUTTON_SELECTOR, "添加辅助邮箱按钮"))
+            auxiliary = run_stage(
+                alias_tab, f"{stage_prefix}-auxiliary-load",
+                lambda: auxiliary_credentials or auxiliary_loader(auxiliary_credentials_file),
+            )
             if auxiliary_result is not None:
                 auxiliary_result.clear()
                 auxiliary_result.append(auxiliary)
-            input_value(
-                alias_tab,
-                "#floatingLabelInput10",
-                "辅助邮箱输入框",
-                auxiliary.email,
-                clear=True,
+            run_stage(
+                alias_tab, f"{stage_prefix}-auxiliary-input",
+                lambda: input_value(alias_tab, "#floatingLabelInput10", "辅助邮箱输入框", auxiliary.email, clear=True),
             )
             submitted_at = utcnow()
-            click_value(alias_tab, PRIMARY_BUTTON_SELECTOR, "辅助邮箱 Add email 按钮")
-            run_locked(
-                lambda: waiter(alias_tab, "#codeEntry-0", "安全验证码输入框", timeout)
+            run_stage(alias_tab, f"{stage_prefix}-auxiliary-submit", lambda: click_value(alias_tab, PRIMARY_BUTTON_SELECTOR, "辅助邮箱 Add email 按钮"))
+            run_stage(
+                alias_tab, f"{stage_prefix}-code-input-wait",
+                lambda: run_locked(lambda: waiter(alias_tab, "#codeEntry-0", "安全验证码输入框", timeout)),
             )
-            code = security_code_fetcher(
-                auxiliary,
-                timeout=mail_timeout,
-                not_before=submitted_at,
-                target_email=email,
+            code = run_stage(
+                alias_tab, f"{stage_prefix}-mail-fetch",
+                lambda: security_code_fetcher(
+                    auxiliary,
+                    timeout=mail_timeout,
+                    not_before=submitted_at,
+                    target_email=email,
+                ),
             )
-            fill_security_code(
-                alias_tab,
-                code,
-                timeout=timeout,
-                waiter=waiter,
-                clicker=clicker,
-                sleeper=sleeper,
-                interaction_lock=interaction_lock,
+            run_stage(
+                alias_tab, f"{stage_prefix}-code-fill-submit",
+                lambda: fill_security_code(
+                    alias_tab,
+                    code,
+                    timeout=timeout,
+                    waiter=waiter,
+                    clicker=clicker,
+                    sleeper=sleeper,
+                    interaction_lock=interaction_lock,
+                ),
             )
-            wait_for_credential_submission(
-                alias_tab,
-                timeout=timeout,
-                state_reader=read_state,
-                sleeper=sleeper,
-                monotonic=monotonic,
+            run_stage(
+                alias_tab, f"{stage_prefix}-submission-wait",
+                lambda: wait_for_credential_submission(
+                    alias_tab,
+                    timeout=timeout,
+                    state_reader=read_state,
+                    sleeper=sleeper,
+                    monotonic=monotonic,
+                ),
             )
-            navigate_value(alias_tab, ADD_ALIAS_URL, "重新打开微软邮箱别名添加页")
-            current_state = wait_for_alias_entry(
-                alias_tab,
-                timeout=timeout,
-                state_reader=read_state,
-                sleeper=sleeper,
-                monotonic=monotonic,
+            run_stage(alias_tab, f"{stage_prefix}-reopen-addassocid", lambda: navigate_value(alias_tab, ADD_ALIAS_URL, "重新打开微软邮箱别名添加页"))
+            current_state = run_stage(
+                alias_tab, f"{stage_prefix}-entry-wait",
+                lambda: wait_for_alias_entry(
+                    alias_tab,
+                    timeout=timeout,
+                    state_reader=read_state,
+                    sleeper=sleeper,
+                    monotonic=monotonic,
+                ),
             )
             current_href = str(current_state.get("href") or "")
         input_value(

@@ -1062,6 +1062,83 @@ def test_credential_action_redirect_adds_auxiliary_email_before_aliases() -> Non
     assert code_not_before == [sent_at]
 
 
+def test_credential_action_timeout_records_stage_and_screenshot(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    class FakeElement:
+        def __init__(self, selector: str) -> None:
+            self.selector = selector
+
+        def input(self, value: str, clear: bool = False) -> None:
+            return None
+
+        def click(self, **kwargs: object) -> None:
+            return None
+
+    class FakeTab:
+        def __init__(self, href: str = app.ADD_ALIAS_URL) -> None:
+            self.href = href
+
+        def ele(self, selector: str, timeout: float = 0.25) -> FakeElement | None:
+            if selector == "#floatingLabelInput10":
+                return None
+            if selector.startswith("#codeEntry-"):
+                return FakeElement(selector)
+            return FakeElement(selector)
+
+        def get(self, url: str, **kwargs: object) -> None:
+            self.href = url
+
+        def run_js(self, script: str, **kwargs: object) -> object:
+            return {"href": self.href, "ready_state": "complete"}
+
+        def screenshot(self, path: str, **kwargs: object) -> None:
+            Path(path).write_bytes(b"png")
+
+    class FakePage(FakeTab):
+        def new_tab(self, url: str, background: bool = False) -> FakeTab:
+            return FakeTab(url)
+
+    page = FakePage("https://account.microsoft.com/?lang=en-US")
+
+    def navigator(target: FakeTab, url: str, description: str, **kwargs: object) -> None:
+        target.get(url)
+        target.href = "https://account.live.com/interrupt/credentialaction?mkt=EN-US"
+
+    def waiter(target: FakeTab, selector: str, description: str, timeout: float) -> FakeElement:
+        if selector == "#floatingLabelInput10":
+            raise TimeoutError("placeholder")
+        return FakeElement(selector)
+
+    with caplog.at_level("INFO", logger=app.LOG.name):
+        with pytest.raises(TimeoutError):
+            app.login_and_add_aliases(
+                page,
+                email="person@example.com",
+                password="secret",
+                timeout=1,
+                waiter=waiter,
+                clicker=lambda *args, **kwargs: None,
+                navigator=navigator,
+                state_reader=lambda target: {
+                    "href": target.href,
+                    "ready_state": "complete",
+                },
+                sleeper=lambda seconds: None,
+                auxiliary_loader=lambda path: app.AccountCredentials(
+                    email="helper@example.com",
+                    password="helper-pass",
+                    client_id="helper-client",
+                    token="helper-token",
+                ),
+                diagnostic_dir=tmp_path / "diagnostics",
+            )
+
+    snapshots = list((tmp_path / "diagnostics").glob("credentialaction-alias-1-1-auxiliary-input*.png"))
+    assert snapshots and snapshots[0].read_bytes() == b"png"
+    assert "credentialaction-alias-1-1-auxiliary-input" in caplog.text
+
+
 def test_fetch_security_code_falls_back_to_mode4_o2() -> None:
     class BrokenFetcher:
         class requests:

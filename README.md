@@ -42,6 +42,8 @@
 
 完整凭据只在 `collect` job 的工作区生成并上传 Artifact，不写入仓库；矩阵任务的 `result.json`、Actions 日志和 Summary 仍只保存状态与邮箱地址。
 
+每个矩阵任务另外上传 `microsoft-email-diagnostic-<index>` Artifact。该 Artifact 只包含 credentialaction 页面阶段的诊断截图；运行日志会记录阶段名、页面类型、readyState 和关键元素存在状态，不记录完整 URL、密码或令牌。
+
 失败、超时、Artifact 损坏或只完成一个别名的主邮箱不会被删除。
 
 ## 本地验证
