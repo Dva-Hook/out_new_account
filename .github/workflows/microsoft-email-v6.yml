@@ -1,0 +1,218 @@
+name: Microsoft 邮箱别名 V6
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_count:
+        description: "任务数量（留空自动使用邮箱池，最多 256）"
+        required: false
+        default: ""
+        type: string
+      max_parallel:
+        description: "最大并发数量（1-20）"
+        required: true
+        default: "20"
+        type: string
+      auxiliary_credentials:
+        description: "绑定辅助邮箱（邮箱----密码----客户端id----令牌；留空使用辅助邮箱.txt或仓库Secret）"
+        required: false
+        default: ""
+        type: string
+      page_timeout:
+        description: "页面超时秒数（30-300）"
+        required: true
+        default: "90"
+        type: string
+      mail_timeout:
+        description: "邮件取件超时秒数（30-600）"
+        required: true
+        default: "240"
+        type: string
+
+concurrency:
+  group: microsoft-email-v6-${{ github.repository }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: 准备任务矩阵
+    runs-on: ubuntu-latest
+    outputs:
+      indices: ${{ steps.matrix.outputs.indices }}
+      task_count: ${{ steps.matrix.outputs.task_count }}
+      max_parallel: ${{ steps.matrix.outputs.max_parallel }}
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 校验并生成矩阵
+        id: matrix
+        env:
+          TASK_COUNT: ${{ inputs.task_count }}
+          MAX_PARALLEL: ${{ inputs.max_parallel }}
+          PAGE_TIMEOUT: ${{ inputs.page_timeout }}
+          MAIL_TIMEOUT: ${{ inputs.mail_timeout }}
+        run: |
+          python email_pool.py prepare \
+            --file verified_email.txt \
+            --tasks "$TASK_COUNT" \
+            --parallel "$MAX_PARALLEL" \
+            --page-timeout "$PAGE_TIMEOUT" \
+            --mail-timeout "$MAIL_TIMEOUT" \
+            --github-output "$GITHUB_OUTPUT"
+
+  register:
+    name: 处理主邮箱 ${{ matrix.index }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.max_parallel) }}
+      matrix:
+        index: ${{ fromJSON(needs.prepare.outputs.indices) }}
+    env:
+      AUXILIARY_CREDENTIALS: ${{ inputs.auxiliary_credentials || secrets.AUXILIARY_CREDENTIALS }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 脱敏辅助邮箱凭据
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          value = os.environ.get("AUXILIARY_CREDENTIALS", "")
+          if value:
+              print(f"::add-mask::{value}")
+              for part in value.split("----", 3):
+                  if part:
+                      print(f"::add-mask::{part}")
+          PY
+      - name: 脱敏当前主邮箱凭据
+        shell: bash
+        env:
+          JOB_INDEX: ${{ matrix.index }}
+        run: |
+          python - <<'PY'
+          import os
+          from email_pool import select_email
+          account = select_email("verified_email.txt", int(os.environ["JOB_INDEX"]))
+          for value in (account.email, account.password, account.client_id, account.token):
+              if value:
+                  print(f"::add-mask::{value}")
+          PY
+      - name: 安装依赖与浏览器
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m ruyipage install
+      - name: 恢复静态资源缓存
+        run: mkdir -p static_cache_seed
+      - name: 读取静态资源缓存
+        uses: actions/cache@v4
+        with:
+          path: static_cache_seed
+          key: ${{ runner.os }}-ruyipage-static-v2-${{ hashFiles('requirements.txt') }}
+      - name: 运行单账号任务
+        id: run
+        continue-on-error: true
+        env:
+          JOB_INDEX: ${{ matrix.index }}
+          PAGE_TIMEOUT: ${{ inputs.page_timeout }}
+          MAIL_TIMEOUT: ${{ inputs.mail_timeout }}
+        run: |
+          xvfb-run -a python register_job.py \
+            --邮箱文件 verified_email.txt \
+            --任务索引 "$JOB_INDEX" \
+            --输出目录 "artifacts/job-$JOB_INDEX" \
+            --静态缓存目录 static_cache_seed \
+            --表单超时秒数 "$PAGE_TIMEOUT" \
+            --邮件超时秒数 "$MAIL_TIMEOUT" \
+            --无头
+      - name: 上传任务结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: microsoft-email-result-${{ matrix.index }}
+          path: artifacts/job-${{ matrix.index }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: 标记任务失败
+        if: steps.run.outcome != 'success'
+        run: exit 1
+
+  collect:
+    name: 汇总并回写邮箱池
+    if: always()
+    needs: [prepare, register]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 下载全部任务结果
+        if: needs.prepare.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: microsoft-email-result-*
+          path: ${{ runner.temp }}/microsoft-email-results
+          merge-multiple: false
+      - name: 幂等汇总并推送
+        if: needs.prepare.result == 'success'
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/microsoft-email-results
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in $(seq 1 3); do
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            python collect_results.py \
+              --结果目录 "$RESULTS_DIR" \
+              --邮箱文件 verified_email.txt \
+              --输出文件 成功账号.txt \
+              --预期任务数量 "${{ needs.prepare.outputs.task_count }}" \
+              --summary "$GITHUB_STEP_SUMMARY"
+            git add -- verified_email.txt 成功账号.txt
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -m "更新 Microsoft 邮箱别名处理结果"
+            if git push origin "HEAD:$GITHUB_REF_NAME"; then
+              exit 0
+            fi
+          done
+          echo "三次推送均发生冲突" >&2
+          exit 1
+      - name: 记录准备阶段失败
+        if: needs.prepare.result != 'success'
+        run: |
+          echo "prepare job 未成功，跳过结果汇总与邮箱池回写。" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+      - name: 上传成功账号文件
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: microsoft-email-success-${{ github.run_id }}
+          path: 成功账号.txt
+          if-no-files-found: warn
+          retention-days: 30

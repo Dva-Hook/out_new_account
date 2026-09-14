@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+.venv/
+work/
+artifacts/
+profiles/
+failure_snapshots/
+*.log
+VERIFICATION.txt
+DIFF_FILE.patch
+ROLLBACK.sh
+rollback-check/

@@ -1,0 +1,4 @@
+ruyiPage==1.2.46
+requests==2.32.3
+pytest==8.3.5
+PyYAML==6.0.2
