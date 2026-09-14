@@ -29,7 +29,7 @@
 2. `register` 为每个账号启动一个独立 runner，内部最多尝试三次；Graph 取件失败时回退 O2。
 3. `collect` 始终执行，只接受两条别名都确认成功的 Artifact，生成 `成功账号.txt` 并从 `verified_email.txt` 删除成功主邮箱。
 
-`成功账号.txt` 只上传到 `microsoft-email-success-<run_id>` Artifact，不提交到仓库；仓库只回写已成功处理的主邮箱池删除结果。Artifact 中的四行使用完整凭据格式：
+`成功账号.txt` 只上传到名为 `ALL-所有成功邮件` 的 Artifact，不提交到仓库；仓库只回写已成功处理的主邮箱池删除结果。Artifact 中的四行使用完整凭据格式：
 
 成功文件每个账号固定四行：
 

@@ -55,5 +55,7 @@ def test_success_file_is_artifact_only() -> None:
     assert "git add -- verified_email.txt 成功账号.txt" not in text
     assert "git add -- verified_email.txt" in text
     assert "path: 成功账号.txt" in text
+    assert "name: ALL-所有成功邮件" in text
+    assert "name: microsoft-email-success-${{ github.run_id }}" not in text
     assert "--完整凭据输出" in text
     assert "AUXILIARY_CREDENTIALS: ${{ inputs.auxiliary_credentials || secrets.AUXILIARY_CREDENTIALS }}" in text
